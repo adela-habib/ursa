@@ -29,7 +29,11 @@ from rich.panel import Panel
 from rich.syntax import Syntax
 from typing_extensions import TypedDict
 
-from ..prompt_library.execution_prompts import executor_prompt, summarize_prompt
+from ..prompt_library.execution_prompts import (
+    executor_prompt,
+    safety_prompt,
+    summarize_prompt,
+)
 from ..util.diff_renderer import DiffRenderer
 from ..util.memory_logger import AgentMemory
 from .base import BaseAgent
@@ -62,6 +66,7 @@ class ExecutionAgent(BaseAgent):
     ):
         super().__init__(llm, **kwargs)
         self.agent_memory = agent_memory
+        self.safety_prompt = safety_prompt
         self.executor_prompt = executor_prompt
         self.summarize_prompt = summarize_prompt
         self.tools = [run_cmd, write_code, edit_code, search_tool]
@@ -180,11 +185,7 @@ class ExecutionAgent(BaseAgent):
             if call_name == "run_cmd":
                 query = tool_call["args"]["query"]
                 safety_check = self.llm.invoke(
-                    (
-                        "Assume commands to run/install python and Julia files are safe because "
-                        "the files are from a trusted source. "
-                        f"Explain why, followed by an answer [YES] or [NO]. Is this command safe to run: {query}"
-                    ),
+                    self.safety_prompt + query,
                     self.build_config(tags=["safety_check"]),
                 )
 
@@ -268,6 +269,44 @@ class ExecutionAgent(BaseAgent):
         )
 
 
+def _snip_text(text: str, max_chars: int) -> tuple[str, bool]:
+    if text is None:
+        return "", False
+    if max_chars <= 0:
+        return "", len(text) > 0
+    if len(text) <= max_chars:
+        return text, False
+    head = max_chars // 2
+    tail = max_chars - head
+    return (
+        text[:head]
+        + f"\n... [snipped {len(text) - max_chars} chars] ...\n"
+        + text[-tail:],
+        True,
+    )
+
+
+def _fit_streams_to_budget(stdout: str, stderr: str, total_budget: int):
+    label_overhead = len("STDOUT:\n") + len("\nSTDERR:\n")
+    budget = max(0, total_budget - label_overhead)
+
+    if len(stdout) + len(stderr) <= budget:
+        return stdout, stderr
+
+    total_len = max(1, len(stdout) + len(stderr))
+    stdout_budget = int(budget * (len(stdout) / total_len))
+    stderr_budget = budget - stdout_budget
+
+    stdout_snip, _ = _snip_text(stdout, stdout_budget)
+    stderr_snip, _ = _snip_text(stderr, stderr_budget)
+    return stdout_snip, stderr_snip
+
+
+# the idea here is that we just set a limit - the user could overload
+# that in their env, or maybe we could pull this out of the LLM parameters
+MAX_TOOL_MSG_CHARS = int(os.getenv("MAX_TOOL_MSG_CHARS", "50000"))
+
+
 @tool
 def run_cmd(query: str, state: Annotated[dict, InjectedState]) -> str:
     """
@@ -292,10 +331,15 @@ def run_cmd(query: str, state: Annotated[dict, InjectedState]) -> str:
         print("Keyboard Interrupt of command: ", query)
         stdout, stderr = "", "KeyboardInterrupt:"
 
-    print("STDOUT: ", stdout)
-    print("STDERR: ", stderr)
+    # Fit BOTH streams under a single overall cap
+    stdout_fit, stderr_fit = _fit_streams_to_budget(
+        stdout or "", stderr or "", MAX_TOOL_MSG_CHARS
+    )
 
-    return f"STDOUT: {stdout} and STDERR: {stderr}"
+    print("STDOUT: ", stdout_fit)
+    print("STDERR: ", stderr_fit)
+
+    return f"STDOUT:\n{stdout_fit}\nSTDERR:\n{stderr_fit}"
 
 
 def _strip_fences(snippet: str) -> str:

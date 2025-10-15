@@ -3,14 +3,19 @@ import os
 import subprocess
 from typing import Any, Dict, List, Mapping, Optional, TypedDict
 
-import atomman as am
 import tiktoken
-import trafilatura
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langgraph.graph import END, StateGraph
 
 from .base import BaseAgent
+
+working = True
+try:
+    import atomman as am
+    import trafilatura
+except Exception:
+    working = False
 
 
 class LammpsState(TypedDict, total=False):
@@ -50,6 +55,10 @@ class LammpsAgent(BaseAgent):
         max_tokens: int = 200000,
         **kwargs,
     ):
+        if not working:
+            raise ImportError(
+                "LAMMPS agent requires the atomman and trafilatura dependencies. These can be installed using 'pip install ursa-ai[lammps]' or, if working from a local installation, 'pip install -e .[lammps]' ."
+            )
         self.max_potentials = max_potentials
         self.max_fix_attempts = max_fix_attempts
         self.mpi_procs = mpi_procs
